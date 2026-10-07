@@ -1,0 +1,10 @@
+{
+  "name": "Reelbox",
+  "short_name": "Reelbox",
+  "description": "A fast movie and TV discovery room.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0d10",
+  "theme_color": "#0b0d10",
+  "icons": [{ "src": "/reelbox-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }]
+}

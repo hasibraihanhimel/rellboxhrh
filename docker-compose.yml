@@ -1,0 +1,14 @@
+services:
+  reelbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reelbox
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+    ports:
+      - "${REELBOX_PORT:-3000}:3000"
+    restart: unless-stopped
