@@ -369,15 +369,11 @@ async def proxy_media(subject_id: str, se: int, ep: int, source_index: int, requ
     domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
     player_referer = f"{domain}/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
     forward_headers = {
-        "User-Agent": PLAYER_HEADERS["User-Agent"],
-        "Accept": "*/*",
-        "Accept-Language": PLAYER_HEADERS["Accept-Language"],
-        "Accept-Encoding": "identity",
-        "Origin": domain,
-        "Referer": player_referer,
-        "Sec-Fetch-Dest": "video",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site",
+           "User-Agent": PLAYER_HEADERS["User-Agent"],
+    "Accept": "*/*",
+    "Accept-Language": PLAYER_HEADERS["Accept-Language"],
+    "Referer": player_referer,
+    "Origin": domain,
     }
     if request.headers.get("range"):
         forward_headers["Range"] = request.headers["range"]
@@ -392,15 +388,11 @@ async def proxy_media(subject_id: str, se: int, ep: int, source_index: int, requ
         # Some CDN edges reject the player-page referer; retry with the stable
         # media origin referer that also works for direct browser range requests.
         retry_headers = {
-            "User-Agent": PLAYER_HEADERS["User-Agent"],
-            "Accept": "*/*",
-            "Accept-Language": PLAYER_HEADERS["Accept-Language"],
-            "Accept-Encoding": "identity",
-            "Origin": domain,
-            "Referer": f"{domain}/",
-            "Sec-Fetch-Dest": "video",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "cross-site",
+    "User-Agent": PLAYER_HEADERS["User-Agent"],
+    "Accept": "*/*",
+    "Accept-Language": PLAYER_HEADERS["Accept-Language"],
+    "Referer": f"{domain}/",
+    "Origin": domain,
         }
         if request.headers.get("range"):
             retry_headers["Range"] = request.headers["range"]
