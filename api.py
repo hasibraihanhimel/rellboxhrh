@@ -371,6 +371,7 @@ async def proxy_media(subject_id: str, se: int, ep: int, source_index: int, requ
     forward_headers = {
         "User-Agent": PLAYER_HEADERS["User-Agent"],
         "Accept": "*/*",
+        "Accept-Language": PLAYER_HEADERS["Accept-Language"],
         "Accept-Encoding": "identity",
         "Origin": domain,
         "Referer": player_referer,
@@ -393,6 +394,7 @@ async def proxy_media(subject_id: str, se: int, ep: int, source_index: int, requ
         retry_headers = {
             "User-Agent": PLAYER_HEADERS["User-Agent"],
             "Accept": "*/*",
+            "Accept-Language": PLAYER_HEADERS["Accept-Language"],
             "Accept-Encoding": "identity",
             "Origin": domain,
             "Referer": f"{domain}/",
