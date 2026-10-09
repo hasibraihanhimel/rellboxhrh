@@ -136,21 +136,33 @@ async def _make_request(url: str, method: str = "GET", payload: dict = None, cus
     }
     client = await _get_http_client()
     try:
-        if method == "POST":
-            resp = await client.post(url, headers=headers, json=payload)
-        else:
-            resp = await client.get(url, headers=headers)
-
-        # Refresh token if server sends a new one
-        x_user = resp.headers.get("x-user")
+        resp = None
+        transient_statuses = {408, 425, 429, 500, 502, 503, 504}
+        for attempt in range(5):
+            try:
+                if method == "POST":
+                    resp = await client.post(url, headers=headers, json=payload)
+                else:
+                    resp = await client.get(url, headers=headers)
+            except httpx.HTTPError:
+                if attempt >= 4:
+                    raise
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+            if resp.status_code in transient_statuses and attempt < 2:
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+            break
+        # Refresh token if server sends a new one.
+        x_user = resp.headers.get("x-user") if resp is not None else None
         if x_user:
             new_token = json.loads(x_user).get("token")
             if new_token:
                 _bearer_token = new_token
-
+        if resp is None:
+            raise HTTPException(status_code=502, detail="Upstream API returned no response")
         if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Upstream API error: {resp.status_code}")
-
+            raise HTTPException(status_code=502, detail=f"Upstream API error after retries: {resp.status_code}")
         result = resp.json()
         if is_cacheable:
             _response_cache[cache_key] = (asyncio.get_running_loop().time(), result)
@@ -359,48 +371,67 @@ async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep:
 
 @app.get("/api/media/{subject_id}/{se}/{ep}/{source_index}")
 async def proxy_media(subject_id: str, se: int, ep: int, source_index: int, request: Request, detail_path: str):
-    """Proxy signed media with range support and the upstream player referer."""
-    data = await _get_player_data(subject_id, detail_path, se, ep)
-    streams = data.get("streams", [])
-    if source_index < 0 or source_index >= len(streams) or not streams[source_index].get("url"):
-        raise HTTPException(status_code=404, detail="Media source unavailable")
-
-    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
-    domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
-    player_referer = f"{domain}/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
-    forward_headers = {
-           "User-Agent": PLAYER_HEADERS["User-Agent"],
-    "Accept": "*/*",
-    "Accept-Language": PLAYER_HEADERS["Accept-Language"],
-    "Referer": player_referer,
-    "Origin": domain,
-    }
-    if request.headers.get("range"):
-        forward_headers["Range"] = request.headers["range"]
-
+    """Proxy signed media with retries for unstable CDN edges and expired source URLs."""
+    cache_key = f"{subject_id}:{detail_path}:{se}:{ep}"
+    range_header = request.headers.get("range")
     client = await _get_http_client()
-    media_url = streams[source_index]["url"]
-    upstream_request = client.build_request("GET", media_url, headers=forward_headers)
-    upstream = await client.send(upstream_request, stream=True)
-    if upstream.status_code == 426:
-        await upstream.aread()
-        await upstream.aclose()
-        # Some CDN edges reject the player-page referer; retry with the stable
-        # media origin referer that also works for direct browser range requests.
-        retry_headers = {
-    "User-Agent": PLAYER_HEADERS["User-Agent"],
-    "Accept": "*/*",
-    "Accept-Language": PLAYER_HEADERS["Accept-Language"],
-    "Referer": f"{domain}/",
-    "Origin": domain,
+    upstream = None
+    last_status = None
+
+    for attempt in range(5):
+        # Refresh player data on the final attempt so a newly signed CDN URL is used.
+        if attempt == 4:
+            _player_cache.pop(cache_key, None)
+        data = await _get_player_data(subject_id, detail_path, se, ep)
+        streams = data.get("streams", [])
+        if source_index < 0 or source_index >= len(streams) or not streams[source_index].get("url"):
+            raise HTTPException(status_code=404, detail="Media source unavailable")
+
+        dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
+        domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
+        player_referer = f"{domain}/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
+        # CDN edges differ in how strictly they validate the player referer.
+        referer = player_referer if attempt % 2 == 0 else f"{domain}/"
+        forward_headers = {
+            "User-Agent": PLAYER_HEADERS["User-Agent"],
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Origin": domain,
+            "Referer": referer,
+            "Sec-Fetch-Dest": "video",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "cross-site",
         }
-        if request.headers.get("range"):
-            retry_headers["Range"] = request.headers["range"]
-        upstream = await client.send(client.build_request("GET", media_url, headers=retry_headers), stream=True)
-    if upstream.status_code >= 400:
-        await upstream.aread()
-        await upstream.aclose()
-        raise HTTPException(status_code=502, detail=f"Media source error: {upstream.status_code}")
+        if range_header:
+            forward_headers["Range"] = range_header
+
+        media_url = streams[source_index]["url"]
+        try:
+            upstream = await client.send(client.build_request("GET", media_url, headers=forward_headers), stream=True)
+        except httpx.HTTPError as error:
+            last_status = str(error)
+            if attempt < 4:
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+            raise HTTPException(status_code=502, detail="Media source connection failed after retries") from error
+
+        last_status = upstream.status_code
+        transient = upstream.status_code in {408, 425, 426, 429, 500, 502, 503, 504}
+        if transient:
+            await upstream.aread()
+            await upstream.aclose()
+            upstream = None
+            if attempt < 4:
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+        if upstream.status_code >= 400:
+            await upstream.aread()
+            await upstream.aclose()
+            raise HTTPException(status_code=502, detail=f"Media source error after retries: {upstream.status_code}")
+        break
+
+    if upstream is None:
+        raise HTTPException(status_code=502, detail=f"Media source unavailable after retries: {last_status}")
 
     response_headers = {}
     for header in ("content-type", "content-length", "content-range", "accept-ranges", "etag", "last-modified"):
@@ -467,9 +498,24 @@ async def _get_player_data(subject_id: str, detail_path: str, se: int, ep: int) 
         )
         play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
         client = await _get_http_client()
-        resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Player API error: {resp.status_code}")
+        player_headers = {**PLAYER_HEADERS, "Referer": player_referer}
+        resp = None
+        transient_statuses = {408, 425, 429, 500, 502, 503, 504}
+        for attempt in range(5):
+            try:
+                resp = await client.get(play_url, headers=player_headers)
+            except httpx.HTTPError:
+                if attempt >= 4:
+                    raise HTTPException(status_code=502, detail="Player API connection failed after retries")
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+            if resp.status_code in transient_statuses and attempt < 4:
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+            break
+        if resp is None or resp.status_code != 200:
+            status = resp.status_code if resp is not None else "no response"
+            raise HTTPException(status_code=502, detail=f"Player API error after retries: {status}")
         data = resp.json().get("data", {})
         _player_cache[cache_key] = (asyncio.get_running_loop().time(), data)
         if len(_player_cache) > 128:
